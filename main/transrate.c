@@ -36,14 +36,22 @@
 
 /*
  * ### GPIO(General Purpose Input/Output)
- * 録音中にインジケータLEDが点灯(GPIO27 OUTPUT)
+ * 録音中にインジケータLEDが点灯(GPIO26 or GPIO18 OUTPUT)
  * ボタンが押されたら録音開始(GPIO26 INPUT)
+ *---トラ技オリジナル回路用設定---*
  * ESP32 PinNo.15 : DAC_1, ADC2_CH9, RTC_GPIO7, GPIO26(*), EMAC_RXD0
- * ESP32 PinNo.16 : VDET_1, VRTC, ADC1_CH6(*), RTC_GPIO4, GPIO34
+ * ESP32 PinNo.16 : ADC2_CH7, TOUCH7, RTC_GPIO17, GPIO27(*), EMAC_RX_DV
+ * ESP32 PinNo.10 : VDET_1, VRTC, ADC1_CH6(*), RTC_GPIO4, GPIO34
+ *
+ *---トラ技付録基板用設定1---*
+ * ESP32 PinNo.35 : VSPICLK, GPIO18(*), HS1_DATA7
+ * ESP32 PinNo.16 : ADC2_CH7, TOUCH7, RTC_GPIO17, GPIO27(*), EMAC_RX_DV
+ * ESP32 PinNo.10 : VDET_1, VRTC, ADC1_CH6(*), RTC_GPIO4, GPIO34
  */
-#define GPIO_OUTPUT_IO_0    27
+#define GPIO_OUTPUT_IO_0    18
+//#define GPIO_OUTPUT_IO_0 26
 #define GPIO_OUTPUT_PIN_SEL  (1<<GPIO_OUTPUT_IO_0)
-#define GPIO_INPUT_IO_0    26
+#define GPIO_INPUT_IO_0    27
 #define GPIO_INPUT_PIN_SEL  (1<<GPIO_INPUT_IO_0)
 #define ESP_INTR_FLAG_DEFAULT 0
 
@@ -57,11 +65,20 @@
 /*
  * ### UART(Universal Asyncronous Reciever/Transmitter)
  * ATP3011(音声合成IC)との通信で使用
- * GPIO10,UTx1,SD3
- * GPIO9 ,URx1,SD2
+ *---トラ技オリジナル回路用設定---*
+ * ESP32 PinNo.29 :GPIO10,UTx1,SD3
+ * ESP32 PinNo.28 :GPIO9 ,URx1,SD2
+ *
+ *---トラ技付録基板用設定---*
+ * ESP32 PinNo.27 :GPIO17,UTx2(*),EMAC_CLK_OUT_180
+ * ESP32 PinNo.25 :GPIO16,URx2(*),EMAC_CLK_OUT
+ *
  */
-#define ECHO_TEST_TXD  (10)
-#define ECHO_TEST_RXD  (9)
+
+//#define ECHO_TEST_TXD  (10)
+//#define ECHO_TEST_RXD  (9)
+#define ECHO_TEST_TXD  (17)
+#define ECHO_TEST_RXD  (16)
 #define BUF_SIZE (1024)
 
 /*
@@ -78,7 +95,6 @@ static unsigned char header[44] = {
     0x00, 0x7D, 0x00, 0x00
 };
 
-
 /* Audio data buffer */
 unsigned char audio_test[32044];
 static int bufferLength = 32043;
@@ -86,11 +102,15 @@ static int bufferLength = 32043;
 /* BAE64 encode buffer */
 unsigned char base64_buffer[42730];
 
+unsigned int bufferCount = 0;
+short int analogVal = 0;
+size_t len;
+
 /* transcript data buffer */
 char transcript[64];
 
 /*　task　ponter　*/
-static int *adcEnd,*wifiEnd;
+static int *adcEnd, *wifiEnd;
 
 /* ローマ字変換後のデータ入れ物 */
 static char romaji[64];
@@ -103,8 +123,8 @@ static const char *TAG = "ESP-WROOM-32 : ";
  * SSID & PASSの設定
  * SpeeechTrancrateSW でリクエストの内容を変える
  */
-#define EXAMPLE_WIFI_SSID "HWD14_D02DB3F780FD"
-#define EXAMPLE_WIFI_PASS "000d8029n15qbyr"
+#define EXAMPLE_WIFI_SSID "DAMMY_SSID"
+#define EXAMPLE_WIFI_PASS "PASSWORD"
 int SpeeechTrancrateSW = 1;
 char REQUEST_SERVER[64], REQUEST_PORT[64];
 
@@ -120,7 +140,7 @@ const int CONNECTED_BIT = BIT0;
  * ### Google API Access token
  *　How to Get Access token : https://cloud.google.com/docs/authentication?hl=ja
  */
-#define AccessToken "ya29.El_dBLO_EuidG0OGW4CYrDSYoBPtWGLmKDEpgApfiObF8jhjGbdk29QhbUKX38u7o-ZP8d-6eZ3x9bmO73WcBMFygZNOhUE75BxemNwPUZUjm0hJJesDEUD_8S5VGJ9p5A"
+#define AccessToken "ya29.El_tBAN_1ptLuxTSUpd0EqAmxIBS7M4wKzHb0lKDYC4DbXavLxaIUukk879u9GaFm2KuRQRMNFHhaJR3KbWR5PVaPwMcdNP0m3zcQeucz85dkFd8QkyNBekvKXDmN56RbA"
 
 /*
  * ### Cloud Speech API
@@ -171,6 +191,7 @@ static const char *TRANSLATE_API_REQ_2 = TRANSLATE_JSON_1"\r\n\r\n";
 /*
  * ひらがな⇆ローマ字変換dictionary
  * 文字code : UTF-8
+ *　頑張れば漢字なんかもおしゃべりさせることができるかもしれない...(手記はここで途絶えている)
  */
 #define dicIndex 71
 struct convertDic{
@@ -199,11 +220,8 @@ struct convertDic dic[dicIndex] = {
 static esp_err_t event_handler(void *ctx, system_event_t *event);
 static void initialise_wifi(void);
 static void echo_task(int voice_num);
-static void https_get_task(void *pvParameters);
-static void adc1task(void* arg);
-static void LOG_ERR(const char* tag, char* err, char *mess);
-static void LOG_MESS(const char* tag, const char* mess);
-static void LOG(const char* tag, char* mess, char* content);
+void https_get_task(void *pvParameters);
+void adc1task(void* arg);
 
 /* Root cert for howsmyssl.com, taken from server_root_cert.pem
  
@@ -270,7 +288,7 @@ static void initialise_wifi(void)
  */
 static void echo_task(int voice_num){
     
-    const int uart_num = UART_NUM_1;
+    const int uart_num = UART_NUM_2;
     
     uart_config_t uart_config = {
         .baud_rate = 9600,
@@ -320,10 +338,11 @@ static void echo_task(int voice_num){
 }
 
 
-static void https_get_task(void *pvParameters){
+void https_get_task(void *pvParameters){
+
     char buf[512];
     int flags;
-    static int ret,len;
+    int ret,len;
 
     /* Speech API or Transrate API switch */
     if(SpeeechTrancrateSW){
@@ -344,37 +363,28 @@ static void https_get_task(void *pvParameters){
     mbedtls_ssl_init(&ssl);
     mbedtls_x509_crt_init(&cacert);
     mbedtls_ctr_drbg_init(&ctr_drbg);
-    LOG_MESS(TAG, "Seeding the random number generator");
     
     mbedtls_ssl_config_init(&conf);
     
     mbedtls_entropy_init(&entropy);
     if((ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,NULL, 0)) != 0){
-        LOG_MESS("mbedtls_ctr_drbg_seed returned %d", ret);
         abort();
     }
     
-    LOG_MESS(TAG, "Loading the CA root certificate...");
     
     ret = mbedtls_x509_crt_parse(&cacert, server_root_cert_pem_start,server_root_cert_pem_end-server_root_cert_pem_start);
     
     if(ret < 0){
-        LOG_ERR(TAG, "mbedtls_x509_crt_parse returned -0x%x\n\n", -ret);
         abort();
     }
     
-    LOG_MESS(TAG, "Setting hostname for TLS session...");
     
     /* Hostname set here should match CN in server certificate */
     if((ret = mbedtls_ssl_set_hostname(&ssl, REQUEST_SERVER)) != 0){
-        LOG_ERR(TAG, "mbedtls_ssl_set_hostname returned -0x%x", -ret);
         abort();
     }
     
-    LOG_MESS(TAG, "Setting up the SSL/TLS structure...");
-    
     if((ret = mbedtls_ssl_config_defaults(&conf,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT)) != 0){
-        LOG_ERR(TAG, "mbedtls_ssl_config_defaults returned %d", ret);
         goto exit;
     }
     
@@ -390,7 +400,6 @@ static void https_get_task(void *pvParameters){
 #endif
     
     if ((ret = mbedtls_ssl_setup(&ssl, &conf)) != 0){
-        LOG_ERR(TAG, "mbedtls_ssl_setup returned -0x%x\n\n", -ret);
         goto exit;
     }
     
@@ -399,31 +408,25 @@ static void https_get_task(void *pvParameters){
          event group.
          */
         xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,false, true, portMAX_DELAY);
-        LOG_MESS(TAG, "Connected to AP");
+        printf("Connected to AP");
         
         mbedtls_net_init(&server_fd);
         
         printf("Connecting to %s:%s...", REQUEST_SERVER, REQUEST_PORT);
         
         if ((ret = mbedtls_net_connect(&server_fd, REQUEST_SERVER,REQUEST_PORT, MBEDTLS_NET_PROTO_TCP)) != 0){
-            LOG_ERR(TAG, "mbedtls_net_connect returned -%x", -ret);
             goto exit;
         }
         
-        LOG_MESS(TAG, "Connected.");
-        
         mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
         
-        LOG_MESS(TAG, "Performing the SSL/TLS handshake...");
         
         while ((ret = mbedtls_ssl_handshake(&ssl)) != 0){
             if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                LOG_ERR(TAG, "mbedtls_ssl_handshake returned -0x%x", -ret);
                 goto exit;
             }
         }
         
-        LOG_MESS(TAG, "Verifying peer X.509 certificate...");
         
         if ((flags = mbedtls_ssl_get_verify_result(&ssl)) != 0){
             /* In real life, we probably want to close connection if ret != 0 */
@@ -432,10 +435,7 @@ static void https_get_task(void *pvParameters){
             mbedtls_x509_crt_verify_info(buf, sizeof(buf), "  ! ", flags);
         }
         else {
-            LOG_MESS(TAG, "Certificate verified.");
         }
-        
-        LOG_MESS(TAG, "Writing HTTP request...");
         
         len=0;
         
@@ -449,7 +449,6 @@ static void https_get_task(void *pvParameters){
             /* HTTP reqest Header */
             while((ret = mbedtls_ssl_write(&ssl, (const unsigned char *)SPEECH_API_REQ_0, strlen(SPEECH_API_REQ_0))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -457,14 +456,12 @@ static void https_get_task(void *pvParameters){
             /* valiable audio data size */
             while((ret = mbedtls_ssl_write(&ssl, &dataSize, strlen(dataSize))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
             /* JSON half first */
             while((ret = mbedtls_ssl_write(&ssl, (const unsigned char *)SPEECH_API_REQ_1, strlen(SPEECH_API_REQ_1))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -482,7 +479,6 @@ static void https_get_task(void *pvParameters){
             for(req_count=0; req_count<req_buffer_size; req_count++){
                 while((ret = mbedtls_ssl_write(&ssl, &(base64_buffer[12000*req_count]), 12000)) <= 0){
                     if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                        LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                         goto exit;
                     }
                 }
@@ -490,7 +486,6 @@ static void https_get_task(void *pvParameters){
             
             while((ret = mbedtls_ssl_write(&ssl, &(base64_buffer[12000*req_count]), req_buffer_size_surpl-2)) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -501,7 +496,6 @@ static void https_get_task(void *pvParameters){
             /* JSON half first */
             while((ret = mbedtls_ssl_write(&ssl, (const unsigned char *)SPEECH_API_REQ_2, strlen(SPEECH_API_REQ_2))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -516,7 +510,6 @@ static void https_get_task(void *pvParameters){
             /* HTTP reqest Header */
             while((ret = mbedtls_ssl_write(&ssl, (const unsigned char *)TRANSLATE_API_REQ_0, strlen(TRANSLATE_API_REQ_0))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -524,7 +517,6 @@ static void https_get_task(void *pvParameters){
             /* valiable transcript data size */
             while((ret = mbedtls_ssl_write(&ssl, &dataSize, strlen(dataSize))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -532,7 +524,6 @@ static void https_get_task(void *pvParameters){
             /* JSON half first */
             while((ret = mbedtls_ssl_write(&ssl, (const unsigned char *)TRANSLATE_API_REQ_1, strlen(TRANSLATE_API_REQ_1))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -540,7 +531,6 @@ static void https_get_task(void *pvParameters){
             /* JSON q = transcript */
             while((ret = mbedtls_ssl_write(&ssl, &transcript, strlen(transcript))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -548,7 +538,6 @@ static void https_get_task(void *pvParameters){
             /* JSON half last */
             while((ret = mbedtls_ssl_write(&ssl, (const unsigned char *)TRANSLATE_API_REQ_2, strlen(TRANSLATE_API_REQ_2))) <= 0){
                 if(ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE){
-                    LOG_ERR(TAG, "mbedtls_ssl_write returned -0x%x", -ret);
                     goto exit;
                 }
             }
@@ -556,8 +545,8 @@ static void https_get_task(void *pvParameters){
         
         len += ret;
         
-        LOG(TAG, "%d bytes written", len);
-        LOG_MESS(TAG, "Reading HTTP response...");
+        printf("%d bytes written", len);
+        printf("Reading HTTP response...");
         
         do{
             len = sizeof(buf) - 1;
@@ -573,17 +562,14 @@ static void https_get_task(void *pvParameters){
             }
             
             if(ret < 0){
-                LOG_ERR(TAG, "mbedtls_ssl_read returned -0x%x", -ret);
                 break;
             }
             
             if(ret == 0){
-                LOG_MESS(TAG, "connection closed");
                 break;
             }
             
             len = ret;
-            LOG(TAG, "%d bytes read", len);
             /* Print response directly to stdout as it is read */
             for(int i = 0; i < len; i++){
                 putchar(buf[i]);
@@ -650,7 +636,6 @@ static void https_get_task(void *pvParameters){
                         /* ATP3011 play Audio */
                         echo_task(5);
                         
-                        //printf("TEST : %s\n", romaji);
                     }
                 }
             }
@@ -664,23 +649,22 @@ static void https_get_task(void *pvParameters){
         
         if(ret != 0){
             mbedtls_strerror(ret, buf, 100);
-            LOG_ERR(TAG, "Last error was: -0x%x", -ret);
         }
-        LOG_MESS(TAG, "Starting again!");
     }
 }
 
-static void adc1task(void* arg)
+
+char flag = 1;
+
+void adc1task(void* arg)
 {
-    unsigned int bufferCount = 0;
-    short int analogVal = 0;
-    size_t len;
     
     while(1){
         
         for (unsigned int loop_index=0; loop_index<1300; loop_index++){};
         
         if(bufferCount <= bufferLength){
+            
             gpio_set_level(GPIO_OUTPUT_IO_0, 1);
             analogVal = adc1_get_voltage(ADC1_TEST_CHANNEL);
             audio_test[51 + bufferCount] = (unsigned char)(analogVal>>2);
@@ -688,32 +672,14 @@ static void adc1task(void* arg)
             audio_test[51 + bufferCount] = (unsigned char)(analogVal<<2);
             bufferCount++;
             
-        }else if(bufferCount>=bufferLength+1){
+        }else if(flag && bufferCount>=bufferLength+1){
             gpio_set_level(GPIO_OUTPUT_IO_0, 0);
             
-            /*for(int i =0; i<sizeof(audio_test); i++){
-                
-                printf("%02X",audio_test[i]);
-                
-            }
-            printf("couont : %X\n",bufferCount);
-            */
             mbedtls_base64_encode(base64_buffer, sizeof(base64_buffer)+1, &len, audio_test, sizeof(audio_test));
             
-            //flag = 0;
+            flag = 0;
             
         }else{
-            
-            /*printf("Audio REC Finish\n");
-             
-             printf("%s",JSON0);
-             for(int i =0; i<sizeof(buffer); i++){
-             
-             printf("%c",buffer[i]);
-             
-             }
-             printf("%s",REQUEST_Google2);
-             */
             
             ESP_ERROR_CHECK( nvs_flash_init() );
             initialise_wifi();
@@ -730,25 +696,9 @@ static void adc1task(void* arg)
     
 }
 
-static void LOG_ERR(const char *tag, char *err, char *mess){
-    printf("%s : ", tag);
-    printf(err, mess);
-    printf("\n");
-}
 
-static void LOG_MESS(const char *tag, const char *mess){
-    printf("%s : ", tag);
-    printf(mess);
-    printf("\n");
-}
-static void LOG(const char *tag, char *mess, char *content){
-    printf("%s : ", tag);
-    printf(mess, content);
-    printf("\n");
-}
-
-void app_main(){
-    
+void app_main()
+{
     /* GPIO output LED setting */
     gpio_config_t io_conf;
     io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
@@ -756,6 +706,7 @@ void app_main(){
     io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
     io_conf.pull_down_en = 0;
     io_conf.pull_up_en = 0;
+    gpio_config(&io_conf);
     
     /* GPIO input BUTTON setting */
     io_conf.intr_type = GPIO_PIN_INTR_POSEDGE;
@@ -764,19 +715,22 @@ void app_main(){
     io_conf.pull_down_en = 0;
     io_conf.pull_up_en = 0;
     gpio_config(&io_conf);
-    
+
     /* initialize ADC */
     adc1_config_width(ADC_WIDTH_12Bit);
     adc1_config_channel_atten(ADC1_TEST_CHANNEL,ADC_ATTEN_11db);
     printf("The adc1 value:%d\n",adc1_get_voltage(ADC1_TEST_CHANNEL));
     
-    /* audio WAV header input */
+    
     for(int i = 0; i<sizeof(header); i++ ){
+        
         audio_test[i] = header[i];
+        
     }
     
-    /* Audio REC task start */
+    /* start adc task (RECORDING) */
     xTaskCreate(adc1task, "adc1task", 2048, NULL, 1, adcEnd);
     vTaskDelay(100 / portTICK_PERIOD_MS);
-
+    
+    
 }
